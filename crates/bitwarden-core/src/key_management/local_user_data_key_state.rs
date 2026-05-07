@@ -47,7 +47,6 @@ pub(crate) struct MigrateLocalUserDataKeyForUserKeyUpgradeError;
 /// - state bridge is not registered by the host
 /// - upgrade token is not available
 /// - no `LocalUserDataKeyState` is present for `user_id` yet (first-time init handles creation),
-/// - the persisted wrapped key already unwraps with the current user key,
 pub(crate) async fn migrate_local_user_data_key_for_user_key_upgrade(
     client: &Client,
     user_id: UserId,
