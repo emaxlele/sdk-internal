@@ -1229,7 +1229,9 @@ mod tests {
     use crate::{
         Client,
         client::test_accounts::{test_bitwarden_com_account, test_bitwarden_com_account_v2},
-        key_management::{KeySlotIds, V2UpgradeToken, state_bridge::test_support::InMemoryStateBridge},
+        key_management::{
+            KeySlotIds, V2UpgradeToken, state_bridge::test_support::InMemoryStateBridge,
+        },
     };
 
     const TEST_VECTOR_USER_KEY_V2_B64: &str = "pQEEAlACHUUoybNAuJoZzqNMxz2bAzoAARFvBIQDBAUGIFggAvGl4ifaUAomQdCdUPpXLHtypiQxHjZwRHeI83caZM4B";
@@ -2409,7 +2411,7 @@ mod tests {
         let client_v1 = Client::init_test_account(test_bitwarden_com_account()).await;
         let user_id = UserId::new(uuid::uuid!("060000fb-0922-4dd3-b170-6e15cb5df8c8"));
 
-        let v1_state = client_v1
+        let v1_user_data_key = client_v1
             .platform()
             .state()
             .get::<LocalUserDataKeyState>()
@@ -2420,10 +2422,10 @@ mod tests {
             .expect("V1 init should plant a LocalUserDataKey state");
         assert!(
             matches!(
-                v1_state.wrapped_key,
+                v1_user_data_key.wrapped_key,
                 EncString::Aes256Cbc_HmacSha256_B64 { .. }
             ),
-            "Initial wrap should use the V1 user key"
+            "Initial local user data key should use be wrapped with a V1 user key"
         );
 
         // Encrypt a payload with the V1-derived LocalUserData key.
@@ -2434,7 +2436,7 @@ mod tests {
                 .unwrap()
         };
 
-        // Build an upgrade token mapping the V1 user key to a fresh V2 key.
+        // Build an upgrade token from the V1 user key to a fresh V2 key.
         let v2_key = SymmetricCryptoKey::try_from(TEST_VECTOR_USER_KEY_V2_B64.to_string()).unwrap();
         let upgrade_token = {
             let mut ctx = client_v1.internal.get_key_store().context_mut();
@@ -2449,9 +2451,14 @@ mod tests {
             .state()
             .get::<LocalUserDataKeyState>()
             .unwrap();
-        repo.set(user_id, v1_state.clone()).await.unwrap();
-        client_v2.km_state_bridge().register_bridge(Box::new(InMemoryStateBridge::default()));
-        client_v2.km_state_bridge().set_v2_upgrade_token(&upgrade_token.clone()).await;
+        repo.set(user_id, v1_user_data_key.clone()).await.unwrap();
+        client_v2
+            .km_state_bridge()
+            .register_bridge(Box::new(InMemoryStateBridge::default()));
+        client_v2
+            .km_state_bridge()
+            .set_v2_upgrade_token(&upgrade_token.clone())
+            .await;
 
         initialize_user_crypto(
             &client_v2,
@@ -2496,7 +2503,7 @@ mod tests {
             ),
             "Rewrapped key should be sealed with the V2 user key"
         );
-        assert_ne!(rewrapped_state.wrapped_key, v1_state.wrapped_key);
+        assert_ne!(rewrapped_state.wrapped_key, v1_user_data_key.wrapped_key);
 
         // Data encrypted before the upgrade must remain decryptable.
         let mut ctx = client_v2.internal.get_key_store().context_mut();
