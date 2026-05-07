@@ -44,9 +44,10 @@ pub(crate) struct MigrateLocalUserDataKeyForUserKeyUpgradeError;
 /// upgrade remains decryptable.
 ///
 /// No-op when:
+/// - state bridge is not registered by the host
+/// - upgrade token is not available
 /// - no `LocalUserDataKeyState` is present for `user_id` yet (first-time init handles creation),
 /// - the persisted wrapped key already unwraps with the current user key,
-/// - or `token` does not apply to the current user key (e.g. attached to a non-upgrade init).
 pub(crate) async fn migrate_local_user_data_key_for_user_key_upgrade(
     client: &Client,
     user_id: UserId,
@@ -77,32 +78,20 @@ pub(crate) async fn migrate_local_user_data_key_for_user_key_upgrade(
         return Ok(());
     };
 
-    let wrapped = WrappedLocalUserDataKey(state.wrapped_key);
-    let rewrapped = {
-        let key_store = client.internal.get_key_store();
-        let mut ctx = key_store.context();
-        if ctx
-            .unwrap_symmetric_key(SymmetricKeySlotId::User, &wrapped.0)
-            .is_ok()
-        {
-            debug!(
-                "WrappedLocalUserDataKey already unwraps with current user key, skipping rewrap"
+    let mut ctx = client.internal.get_key_store().context_mut();
+    let v1_user_key_id = match token.unwrap_v1(SymmetricKeySlotId::User, &mut ctx) {
+        Ok(id) => id,
+        Err(_) => {
+            info!(
+                "Upgrade token does not apply to current user key, skipping WrappedLocalUserDataKey migration"
             );
             return Ok(());
         }
-        let v1_key_id = match token.unwrap_v1(SymmetricKeySlotId::User, &mut ctx) {
-            Ok(id) => id,
-            Err(_) => {
-                info!(
-                    "Upgrade token does not apply to current user key, leaving WrappedLocalUserDataKey unchanged"
-                );
-                return Ok(());
-            }
-        };
-        wrapped
-            .rewrap_with_user_key(v1_key_id, &mut ctx)
-            .map_err(|_| MigrateLocalUserDataKeyForUserKeyUpgradeError)?
     };
+
+    let wrapped = WrappedLocalUserDataKey(state.wrapped_key);
+    let rewrapped = wrapped.rewrap_with_user_key(v1_user_key_id, &mut ctx)
+        .map_err(|_| MigrateLocalUserDataKeyForUserKeyUpgradeError)?;
 
     info!("Rewrapping WrappedLocalUserDataKey with current user key");
     repo.set(user_id, rewrapped.into())
