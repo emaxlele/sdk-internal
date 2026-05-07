@@ -1229,7 +1229,7 @@ mod tests {
     use crate::{
         Client,
         client::test_accounts::{test_bitwarden_com_account, test_bitwarden_com_account_v2},
-        key_management::{KeySlotIds, V2UpgradeToken},
+        key_management::{KeySlotIds, V2UpgradeToken, state_bridge::test_support::InMemoryStateBridge},
     };
 
     const TEST_VECTOR_USER_KEY_V2_B64: &str = "pQEEAlACHUUoybNAuJoZzqNMxz2bAzoAARFvBIQDBAUGIFggAvGl4ifaUAomQdCdUPpXLHtypiQxHjZwRHeI83caZM4B";
@@ -2450,6 +2450,8 @@ mod tests {
             .get::<LocalUserDataKeyState>()
             .unwrap();
         repo.set(user_id, v1_state.clone()).await.unwrap();
+        client_v2.km_state_bridge().register_bridge(Box::new(InMemoryStateBridge::default()));
+        client_v2.km_state_bridge().set_v2_upgrade_token(&upgrade_token.clone()).await;
 
         initialize_user_crypto(
             &client_v2,
