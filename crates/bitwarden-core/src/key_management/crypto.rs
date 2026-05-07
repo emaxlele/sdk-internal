@@ -2530,6 +2530,13 @@ mod tests {
         // Fresh client with no planted LocalUserDataKey state.
         let user_id = UserId::new_v4();
         let client = Client::new_test(None);
+        client
+            .km_state_bridge()
+            .register_bridge(Box::new(InMemoryStateBridge::default()));
+        client
+            .km_state_bridge()
+            .set_v2_upgrade_token(&upgrade_token.clone())
+            .await;
 
         initialize_user_crypto(
             &client,
@@ -2585,6 +2592,9 @@ mod tests {
         // First V1 init plants a V1-wrapped state.
         let client = Client::init_test_account(test_bitwarden_com_account()).await;
         let user_id = UserId::new(uuid::uuid!("060000fb-0922-4dd3-b170-6e15cb5df8c8"));
+        client
+            .km_state_bridge()
+            .register_bridge(Box::new(InMemoryStateBridge::default()));
 
         let repo = client
             .platform()
@@ -2613,6 +2623,9 @@ mod tests {
         // V2 init plants a V2-wrapped state.
         let client = Client::init_test_account(test_bitwarden_com_account_v2()).await;
         let user_id = UserId::new(uuid::uuid!("060000fb-0922-4dd3-b170-6e15cb5df8c8"));
+        client
+            .km_state_bridge()
+            .register_bridge(Box::new(InMemoryStateBridge::default()));
 
         let repo = client
             .platform()

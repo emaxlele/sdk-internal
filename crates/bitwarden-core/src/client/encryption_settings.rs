@@ -56,7 +56,7 @@ pub enum EncryptionSettingsError {
     #[error("Unable to load local user data key into key store")]
     LocalUserDataKeyLoadFailed,
 
-    /// The local user data key could not be loaded into the key store context.
+    // The migration (re-wrap) of the local user data key failed after a user key upgrade
     #[error("Unable to migrate local user data key after user key upgrade")]
     LocalUserDataMigrationFailed,
 }
