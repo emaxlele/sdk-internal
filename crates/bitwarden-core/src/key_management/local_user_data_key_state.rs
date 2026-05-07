@@ -1,3 +1,4 @@
+use bitwarden_crypto::EncString;
 use tracing::info;
 
 use crate::{
@@ -76,6 +77,10 @@ pub(crate) async fn migrate_local_user_data_key_for_user_key_upgrade(
     else {
         return Ok(());
     };
+    if !matches!(state.wrapped_key, EncString::Aes256Cbc_HmacSha256_B64 { .. }) {
+        info!("WrappedLocalUserDataKey is not a V1 wrapped key, skipping migration");
+        return Ok(());
+    }
 
     let rewrapped = {
         let mut ctx = client.internal.get_key_store().context_mut();
