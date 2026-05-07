@@ -147,12 +147,19 @@ mod tests {
             .encrypt(&mut ctx, SymmetricKeySlotId::LocalUserData)
             .expect("encryption with LocalUserData slot should succeed");
 
+        // Save v1 to a fresh local id before overwriting the User slot with v2.
+        // Mirrors the production path where the V1→V2 upgrade token re-materializes
+        // v1 into a local slot at rewrap time.
+        let v1_old_wrapping_id = ctx
+            .unwrap_symmetric_key(SymmetricKeySlotId::User, &wrapped_v1_local_key.0)
+            .expect("unwrap with v1 user key should succeed");
+
         // Rewrap
         let new_local = ctx.make_symmetric_key(SymmetricKeyAlgorithm::XChaCha20Poly1305);
         ctx.persist_symmetric_key(new_local, SymmetricKeySlotId::User)
             .expect("persisting new user key should succeed");
         let wrapped_new = wrapped_v1_local_key
-            .rewrap_with_user_key(v1_local_key_id, &mut ctx)
+            .rewrap_with_user_key(v1_old_wrapping_id, &mut ctx)
             .expect("rewrap should succeed");
 
         // Validate that the new wrapped version can still decrypt the data
