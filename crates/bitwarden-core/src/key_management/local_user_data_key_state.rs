@@ -79,14 +79,11 @@ pub(crate) async fn migrate_local_user_data_key_for_user_key_upgrade(
 
     let rewrapped = {
         let mut ctx = client.internal.get_key_store().context_mut();
-        let v1_user_key_id = match token.unwrap_v1(SymmetricKeySlotId::User, &mut ctx) {
-            Ok(id) => id,
-            Err(_) => {
-                info!(
-                    "Upgrade token does not apply to current user key, skipping WrappedLocalUserDataKey migration"
-                );
-                return Ok(());
-            }
+        let Ok(v1_user_key_id) =  token.unwrap_v1(SymmetricKeySlotId::User, &mut ctx) else {
+            info!(
+                "Upgrade token does not apply to current user key, skipping WrappedLocalUserDataKey migration"
+            );
+            return Ok(());
         };
 
         let wrapped = WrappedLocalUserDataKey(state.wrapped_key);
