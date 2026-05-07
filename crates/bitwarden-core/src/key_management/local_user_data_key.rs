@@ -131,22 +131,15 @@ mod tests {
         let key_store = KeyStore::<KeySlotIds>::default();
         let mut ctx = key_store.context_mut();
 
-        // Place an "old" user key (V1) in the User slot.
-        let old_local = ctx.generate_symmetric_key();
-        #[allow(deprecated)]
-        let old_key = ctx
-            .dangerous_get_symmetric_key(old_local)
-            .expect("old key should be available")
-            .clone();
-        ctx.persist_symmetric_key(old_local, SymmetricKeySlotId::User)
+        // Create an initial wrapped local user data key using a V1 user key.
+        let v1_local_key_id = ctx.make_symmetric_key(SymmetricKeyAlgorithm::Aes256CbcHmac);
+        ctx.persist_symmetric_key(v1_local_key_id, SymmetricKeySlotId::User)
             .expect("persisting old user key should succeed");
 
-        // Initial wrap (against the old user key).
-        let wrapped_old = WrappedLocalUserDataKey::from_context_user_key(&mut ctx)
+        let wrapped_v1_local_key = WrappedLocalUserDataKey::from_context_user_key(&mut ctx)
             .expect("initial wrap should succeed");
 
-        // Encrypt data against the LocalUserData slot (which equals the old user key).
-        wrapped_old
+        wrapped_v1_local_key
             .unwrap_to_context(&mut ctx)
             .expect("unwrap with old user key should succeed");
         let plaintext = "rewrap round-trip data";
@@ -154,20 +147,15 @@ mod tests {
             .encrypt(&mut ctx, SymmetricKeySlotId::LocalUserData)
             .expect("encryption with LocalUserData slot should succeed");
 
-        // Keep the old user key accessible as a local id for the rewrap call.
-        let old_kept_id = ctx.add_local_symmetric_key(old_key);
-
-        // Simulate the V1→V2 user key swap.
+        // Rewrap
         let new_local = ctx.make_symmetric_key(SymmetricKeyAlgorithm::XChaCha20Poly1305);
         ctx.persist_symmetric_key(new_local, SymmetricKeySlotId::User)
             .expect("persisting new user key should succeed");
-
-        // Rewrap from old → new user key.
-        let wrapped_new = wrapped_old
-            .rewrap_with_user_key(old_kept_id, &mut ctx)
+        let wrapped_new = wrapped_v1_local_key
+            .rewrap_with_user_key(v1_local_key_id, &mut ctx)
             .expect("rewrap should succeed");
 
-        // Unwrap the rewrapped key using the new User slot — must yield the same inner plaintext.
+        // Validate that the new wrapped version can still decrypt the data
         wrapped_new
             .unwrap_to_context(&mut ctx)
             .expect("unwrap with new user key should succeed");

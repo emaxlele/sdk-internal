@@ -2197,7 +2197,7 @@ mod tests {
         let dummy_token = {
             let key_store = KeyStore::<KeySlotIds>::default();
             let mut ctx = key_store.context_mut();
-            let v1_id = ctx.generate_symmetric_key();
+            let v1_id = ctx.make_symmetric_key(SymmetricKeyAlgorithm::Aes256CbcHmac);
             let v2_id = ctx.make_symmetric_key(SymmetricKeyAlgorithm::XChaCha20Poly1305);
             V2UpgradeToken::create(v1_id, v2_id, &ctx).unwrap()
         };
