@@ -45,6 +45,7 @@ use crate::{
         },
         local_user_data_key_state::{
             get_local_user_data_key_from_state, initialize_local_user_data_key_into_state,
+            migrate_local_user_data_key_for_user_key_upgrade,
         },
         master_password::{MasterPasswordAuthenticationData, MasterPasswordUnlockData},
     },
@@ -1101,6 +1102,10 @@ async fn initialize_user_local_data_key(client: &Client) -> Result<(), Encryptio
         .internal
         .get_user_id()
         .ok_or(EncryptionSettingsError::LocalUserDataKeyInitFailed)?;
+
+    migrate_local_user_data_key_for_user_key_upgrade(client, user_id)
+        .await
+        .map_err(|_| EncryptionSettingsError::LocalUserDataMigrationFailed)?;
 
     initialize_local_user_data_key_into_state(client, user_id)
         .await
@@ -2394,6 +2399,233 @@ mod tests {
             .decrypt(&mut ctx, SymmetricKeySlotId::LocalUserData)
             .expect("decryption after second initialization should succeed");
         assert_eq!(decrypted, "test");
+    }
+
+    #[tokio::test]
+    async fn test_initialize_user_crypto_rewraps_local_user_data_key_on_v1_to_v2_upgrade() {
+        use crate::key_management::LocalUserDataKeyState;
+
+        // Bootstrap a V1 client to materialize a V1-wrapped LocalUserDataKey state.
+        let client_v1 = Client::init_test_account(test_bitwarden_com_account()).await;
+        let user_id = UserId::new(uuid::uuid!("060000fb-0922-4dd3-b170-6e15cb5df8c8"));
+
+        let v1_state = client_v1
+            .platform()
+            .state()
+            .get::<LocalUserDataKeyState>()
+            .unwrap()
+            .get(user_id)
+            .await
+            .unwrap()
+            .expect("V1 init should plant a LocalUserDataKey state");
+        assert!(
+            matches!(
+                v1_state.wrapped_key,
+                EncString::Aes256Cbc_HmacSha256_B64 { .. }
+            ),
+            "Initial wrap should use the V1 user key"
+        );
+
+        // Encrypt a payload with the V1-derived LocalUserData key.
+        let ciphertext = {
+            let mut ctx = client_v1.internal.get_key_store().context_mut();
+            "preserved data"
+                .encrypt(&mut ctx, SymmetricKeySlotId::LocalUserData)
+                .unwrap()
+        };
+
+        // Build an upgrade token mapping the V1 user key to a fresh V2 key.
+        let v2_key = SymmetricCryptoKey::try_from(TEST_VECTOR_USER_KEY_V2_B64.to_string()).unwrap();
+        let upgrade_token = {
+            let mut ctx = client_v1.internal.get_key_store().context_mut();
+            let v2_key_id = ctx.add_local_symmetric_key(v2_key.clone());
+            V2UpgradeToken::create(SymmetricKeySlotId::User, v2_key_id, &ctx).unwrap()
+        };
+
+        // Plant the V1-wrapped state into a fresh client and run init with the upgrade token.
+        let client_v2 = Client::new_test(None);
+        let repo = client_v2
+            .platform()
+            .state()
+            .get::<LocalUserDataKeyState>()
+            .unwrap();
+        repo.set(user_id, v1_state.clone()).await.unwrap();
+
+        initialize_user_crypto(
+            &client_v2,
+            InitUserCryptoRequest {
+                user_id: Some(user_id),
+                kdf_params: Kdf::PBKDF2 {
+                    iterations: 600_000.try_into().unwrap(),
+                },
+                email: TEST_USER_EMAIL.into(),
+                account_cryptographic_state: WrappedAccountCryptographicState::V2 {
+                    private_key: TEST_VECTOR_PRIVATE_KEY_V2.parse().unwrap(),
+                    signing_key: TEST_VECTOR_SIGNING_KEY_V2.parse().unwrap(),
+                    security_state: TEST_VECTOR_SECURITY_STATE_V2.parse().unwrap(),
+                    signed_public_key: Some(TEST_VECTOR_SIGNED_PUBLIC_KEY_V2.parse().unwrap()),
+                },
+                method: InitUserCryptoMethod::MasterPasswordUnlock {
+                    password: TEST_USER_PASSWORD.into(),
+                    master_password_unlock: MasterPasswordUnlockData {
+                        kdf: Kdf::PBKDF2 {
+                            iterations: 600_000.try_into().unwrap(),
+                        },
+                        master_key_wrapped_user_key: TEST_ACCOUNT_USER_KEY.parse().unwrap(),
+                        salt: TEST_USER_EMAIL.to_string(),
+                    },
+                },
+                upgrade_token: Some(upgrade_token),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The persisted wrapped key must be sealed with the V2 user key.
+        let rewrapped_state = repo
+            .get(user_id)
+            .await
+            .unwrap()
+            .expect("LocalUserDataKey state must remain present");
+        assert!(
+            matches!(
+                rewrapped_state.wrapped_key,
+                EncString::Cose_Encrypt0_B64 { .. }
+            ),
+            "Rewrapped key should be sealed with the V2 user key"
+        );
+        assert_ne!(rewrapped_state.wrapped_key, v1_state.wrapped_key);
+
+        // Data encrypted before the upgrade must remain decryptable.
+        let mut ctx = client_v2.internal.get_key_store().context_mut();
+        let decrypted: String = ciphertext
+            .decrypt(&mut ctx, SymmetricKeySlotId::LocalUserData)
+            .expect("data encrypted before the upgrade should decrypt after rewrap");
+        assert_eq!(decrypted, "preserved data");
+    }
+
+    #[tokio::test]
+    async fn test_initialize_user_crypto_creates_new_local_user_data_key_with_upgrade_token_and_no_existing_state()
+     {
+        use crate::key_management::LocalUserDataKeyState;
+
+        // Build an upgrade token from a separate V1 client (no state will be planted from it).
+        let helper = Client::init_test_account(test_bitwarden_com_account()).await;
+        let v2_key = SymmetricCryptoKey::try_from(TEST_VECTOR_USER_KEY_V2_B64.to_string()).unwrap();
+        let upgrade_token = {
+            let mut ctx = helper.internal.get_key_store().context_mut();
+            let v2_key_id = ctx.add_local_symmetric_key(v2_key.clone());
+            V2UpgradeToken::create(SymmetricKeySlotId::User, v2_key_id, &ctx).unwrap()
+        };
+
+        // Fresh client with no planted LocalUserDataKey state.
+        let user_id = UserId::new_v4();
+        let client = Client::new_test(None);
+
+        initialize_user_crypto(
+            &client,
+            InitUserCryptoRequest {
+                user_id: Some(user_id),
+                kdf_params: Kdf::PBKDF2 {
+                    iterations: 600_000.try_into().unwrap(),
+                },
+                email: TEST_USER_EMAIL.into(),
+                account_cryptographic_state: WrappedAccountCryptographicState::V2 {
+                    private_key: TEST_VECTOR_PRIVATE_KEY_V2.parse().unwrap(),
+                    signing_key: TEST_VECTOR_SIGNING_KEY_V2.parse().unwrap(),
+                    security_state: TEST_VECTOR_SECURITY_STATE_V2.parse().unwrap(),
+                    signed_public_key: Some(TEST_VECTOR_SIGNED_PUBLIC_KEY_V2.parse().unwrap()),
+                },
+                method: InitUserCryptoMethod::MasterPasswordUnlock {
+                    password: TEST_USER_PASSWORD.into(),
+                    master_password_unlock: MasterPasswordUnlockData {
+                        kdf: Kdf::PBKDF2 {
+                            iterations: 600_000.try_into().unwrap(),
+                        },
+                        master_key_wrapped_user_key: TEST_ACCOUNT_USER_KEY.parse().unwrap(),
+                        salt: TEST_USER_EMAIL.to_string(),
+                    },
+                },
+                upgrade_token: Some(upgrade_token),
+            },
+        )
+        .await
+        .unwrap();
+
+        // No existing state → standard fresh-init path: a new wrapped key sealed with V2.
+        let new_state = client
+            .platform()
+            .state()
+            .get::<LocalUserDataKeyState>()
+            .unwrap()
+            .get(user_id)
+            .await
+            .unwrap()
+            .expect("LocalUserDataKey should be created on init");
+        assert!(matches!(
+            new_state.wrapped_key,
+            EncString::Cose_Encrypt0_B64 { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_initialize_user_crypto_leaves_local_user_data_key_unchanged_without_upgrade_token()
+     {
+        use crate::key_management::LocalUserDataKeyState;
+
+        // First V1 init plants a V1-wrapped state.
+        let client = Client::init_test_account(test_bitwarden_com_account()).await;
+        let user_id = UserId::new(uuid::uuid!("060000fb-0922-4dd3-b170-6e15cb5df8c8"));
+
+        let repo = client
+            .platform()
+            .state()
+            .get::<LocalUserDataKeyState>()
+            .unwrap();
+        let before = repo.get(user_id).await.unwrap().unwrap();
+
+        // Re-run initialize_local_user_data_key_into_state; must skip idempotently.
+        initialize_local_user_data_key_into_state(&client, user_id)
+            .await
+            .map_err(|_| "should succeed")
+            .unwrap();
+
+        let after = repo.get(user_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.wrapped_key, before.wrapped_key,
+            "without an upgrade token the wrapped key must not change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_user_crypto_does_not_rewrap_when_already_v2() {
+        use crate::key_management::LocalUserDataKeyState;
+
+        // V2 init plants a V2-wrapped state.
+        let client = Client::init_test_account(test_bitwarden_com_account_v2()).await;
+        let user_id = UserId::new(uuid::uuid!("060000fb-0922-4dd3-b170-6e15cb5df8c8"));
+
+        let repo = client
+            .platform()
+            .state()
+            .get::<LocalUserDataKeyState>()
+            .unwrap();
+        let before = repo.get(user_id).await.unwrap().unwrap();
+        assert!(matches!(
+            before.wrapped_key,
+            EncString::Cose_Encrypt0_B64 { .. }
+        ));
+
+        migrate_local_user_data_key_for_user_key_upgrade(&client, user_id)
+            .await
+            .map_err(|_| "should succeed")
+            .unwrap();
+
+        let after = repo.get(user_id).await.unwrap().unwrap();
+        assert_eq!(
+            after.wrapped_key, before.wrapped_key,
+            "an already-V2-wrapped key must not be rewrapped"
+        );
     }
 
     #[tokio::test]
